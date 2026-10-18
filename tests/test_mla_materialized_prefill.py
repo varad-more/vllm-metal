@@ -597,20 +597,26 @@ def test_batched_decode_matches_absorbed_loop(
 def test_shared_storage_matches_count_based_cache(
     kernel: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Prefill, then the batched decode (or the single-pass kernel), over latent
-    views of vLLM's shared allocation must match a count-based cache."""
+    """Prefill, then decode over dirty shared storage must match a zeroed cache."""
     import vllm_metal.attention.impls.mla as mla_mod
     from tests.stub_runner import initialize_mla_runtime
+    from vllm_metal.attention.caches import storage as storage_mod
 
     monkeypatch.setattr("vllm_metal.envs.VLLM_METAL_MLA_KERNEL", kernel)
     monkeypatch.setattr(mla_mod, "_DECODE_BATCH_MIN_ROWS", 4)
+    allocate = storage_mod.allocate_kv_cache_lazily
+
+    def allocate_dirty(*args, **kwargs):
+        tensors = allocate(*args, **kwargs)
+        for tensor in tensors.values():
+            tensor.fill_(float("nan"))
+        return tensors
+
+    monkeypatch.setattr(storage_mod, "allocate_kv_cache_lazily", allocate_dirty)
     inner, _, count_based = _make(num_blocks=16)
     runtime = initialize_mla_runtime(
         16, num_layers=1, kv_lora_rank=_KVL, rope_dim=_ROPE, block_size=_BLK
     )
-    # torch.empty may hand back reused heap memory; start from the zeros the
-    # count-based cache has.
-    runtime.storage.zero_blocks(range(16))
     shared = MLAPagedAttentionWrapper(inner, layer_idx=0, latent_cache=runtime._cache)
 
     pasts = [5, 17, 30, 9, 21, 12]
