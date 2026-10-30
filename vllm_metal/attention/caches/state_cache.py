@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING
 
 import mlx.core as mx
 
-from vllm_metal.attention.caches.storage import CacheViews
-
 if TYPE_CHECKING:
     from vllm_metal.attention.context import PagedAttentionContext
     from vllm_metal.attention.impls.gdn_spec import GDNSpecVerifyStep
@@ -23,16 +21,6 @@ def _native_row_scatter() -> Callable[..., mx.array]:
     from vllm_metal.metal import get_ops
 
     return get_ops().gdn_state_scatter
-
-
-def _gather_state_rows(
-    states: Sequence[mx.array] | CacheViews, layer_idx: int, ids: mx.array
-) -> mx.array:
-    """Rows ``ids`` of ``states[layer_idx]``; shared-pool views stride wider
-    than their rows, so their gather must chunk past 32-bit offsets."""
-    if isinstance(states, CacheViews):
-        return states.gather_rows(layer_idx, ids)
-    return states[layer_idx][ids]
 
 
 @dataclass(frozen=True)
@@ -117,12 +105,12 @@ class PagedStateCache:
         return [idx for idx, o in enumerate(self._layer_group_ordinals) if o == ordinal]
 
     def gather_conv_rows(self, layer_idx: int, ids: mx.array) -> mx.array:
-        """Rows ``ids`` of a layer's conv pool, past 32-bit offsets if needed."""
-        return _gather_state_rows(self.conv_states, layer_idx, ids)
+        """Read selected rows from a layer's conv pool."""
+        return self.conv_states.gather_rows(layer_idx, ids)
 
     def gather_recurrent_rows(self, layer_idx: int, ids: mx.array) -> mx.array:
-        """Rows ``ids`` of a layer's recurrent pool, past 32-bit offsets."""
-        return _gather_state_rows(self.recurrent_states, layer_idx, ids)
+        """Read selected rows from a layer's recurrent pool."""
+        return self.recurrent_states.gather_rows(layer_idx, ids)
 
     def copy_slots(
         self, src_ids: list[int], dst_ids: list[int], layer_indices: list[int]
