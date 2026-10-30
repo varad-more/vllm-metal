@@ -24,6 +24,8 @@ from vllm_metal.tensor_bridge import (
     torch_to_mlx,
 )
 
+_INT32_MAX = 2**31 - 1
+
 
 def allocate_kv_cache_lazily(
     config: KVCacheConfig,
@@ -110,6 +112,31 @@ class CacheViews(Sequence[mx.array]):
         # sibling views, including aliases with a different dtype, see it.
         region = self.descriptors[index][0]
         self.storage.buffers[region] = mx.depends(self.storage.buffers[region], [value])
+
+    def gather_rows(self, index: int, ids: mx.array) -> mx.array:
+        """Rows ``ids`` of view ``index``, gathered along its first axis.
+
+        MLX gathers with 32-bit source offsets whenever the source holds at
+        most ``INT32_MAX`` elements, even if its strides reach further, as a
+        component view inside a wider packed page does. Rows past that offset
+        come back as garbage (#1081, #1112), so gather from row ranges whose
+        offsets fit in 32 bits; a slice moves the view's data pointer.
+        """
+        _, shape, strides, _, _ = self.descriptors[index]
+        view = self[index]
+        rows_per_take = max(_INT32_MAX // strides[0], 1)
+        if shape[0] <= rows_per_take:
+            return view[ids]
+        rows = None
+        for first in range(0, shape[0], rows_per_take):
+            part = view[first : first + rows_per_take]
+            local = ids - first
+            inside = (local >= 0) & (local < part.shape[0])
+            taken = mx.take(part, mx.where(inside, local, 0), axis=0)
+            mask = inside.reshape(-1, *([1] * (len(shape) - 1)))
+            rows = taken if rows is None else mx.where(mask, taken, rows)
+        assert rows is not None
+        return rows
 
 
 class KVCacheStorage:
